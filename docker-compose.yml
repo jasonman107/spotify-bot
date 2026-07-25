@@ -1,0 +1,35 @@
+# Local compose: builds images from this checkout.
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotify-bot-collector
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  trader:
+    build:
+      context: .
+      dockerfile: Dockerfile.trader
+    container_name: spotify-bot-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

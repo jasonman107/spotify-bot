@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+# curl: kworb/Gamma fetch fallback used by kworb_lib.get
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY scripts/requirements.txt scripts/requirements.txt
+RUN pip install --no-cache-dir -r scripts/requirements.txt
+
+COPY scripts/ scripts/
+
+ENV PYTHONUNBUFFERED=1
+CMD ["python3", "scripts/trader.py", "--data-dir", "/app/data"]

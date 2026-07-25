@@ -113,12 +113,23 @@ class Registry:
 
 
 class ChartPanel:
-    """Daily-stream panel: backfill history + live kworb daily-page pulls."""
+    """Daily-stream panel: backfill history + live kworb daily-page pulls.
+
+    Fetched rows are persisted to data/snapshots/trader_daily.csv and
+    reloaded at startup — kworb daily pages only show the LATEST chart day,
+    so a restart mid-week would otherwise lose the earlier days of the
+    in-progress chart week (fatal on a redeployed box)."""
 
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
-        self.live_rows = []  # parsed daily-chart rows fetched by this process
+        self.live_file = data_dir / "snapshots" / "trader_daily.csv"
+        self.live_rows = []
         self.last_fetch = 0.0
+        if self.live_file.exists():
+            df = pd.read_csv(self.live_file, dtype={"streams": "int64"})
+            self.live_rows = df.to_dict("records")
+            print(f"chart panel: reloaded {len(self.live_rows)} persisted "
+                  f"daily rows from {self.live_file}")
         base = load_daily_panel(data_dir / "backfill")
         self.base = base
         self.factors = weekday_factors(base)
@@ -126,15 +137,22 @@ class ChartPanel:
     def refresh(self):
         if time.time() - self.last_fetch < KWORB_REFRESH_S:
             return
+        new_rows = []
         for country in ("global", "us"):
             html = get(f"{KWORB}/spotify/country/{country}_daily.html")
             if not html:
                 continue
             for r in parse_chart_page(html, "daily"):
-                self.live_rows.append({
+                new_rows.append({
                     "country": country, "date": r["chart_date"],
                     "artist_title": r["artist_title"], "streams": r["streams"],
                 })
+        if new_rows:
+            self.live_rows.extend(new_rows)
+            self.live_file.parent.mkdir(parents=True, exist_ok=True)
+            new = not self.live_file.exists()
+            pd.DataFrame(new_rows).to_csv(self.live_file, mode="a",
+                                          index=False, header=new)
         self.last_fetch = time.time()
 
     def panel(self) -> pd.DataFrame:
@@ -142,8 +160,8 @@ class ChartPanel:
         if self.live_rows:
             live = pd.DataFrame(self.live_rows)
             live["date"] = pd.to_datetime(live.date)
-            live = live.groupby(["country", "date", "artist_title"],
-                                as_index=False).streams.sum()
+            live = (live.groupby(["country", "date", "artist_title"],
+                                 as_index=False).streams.last())
             frames.append(live)
         df = pd.concat(frames, ignore_index=True)
         return df.drop_duplicates(subset=["country", "date", "artist_title"],

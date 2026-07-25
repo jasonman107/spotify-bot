@@ -1,0 +1,32 @@
+# Production compose: pulls prebuilt images from GHCR (no build on the box).
+# Used by .github/workflows/deploy.yml on the EC2 host.
+services:
+  collector:
+    image: ghcr.io/jasonman107/spotify-bot/collector:latest
+    container_name: spotify-bot-collector
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  trader:
+    image: ghcr.io/jasonman107/spotify-bot/trader:latest
+    container_name: spotify-bot-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
