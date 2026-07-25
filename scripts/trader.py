@@ -198,8 +198,13 @@ def read_quotes(data_dir: Path) -> dict:
         f.seek(max(f.seek(0, 2) - TICK_TAIL_BYTES, 0))
         chunk = f.read().decode(errors="replace")
     quotes = {}
-    for line in chunk.splitlines()[1:]:
-        p = line.split(",")
+    # Proper CSV parsing: bucket labels can contain commas (e.g.
+    # "Dai Dai - Shakira, Burna Boy") which the writer quotes — a naive
+    # split(",") silently drops every row of such buckets.
+    import csv as _csv
+    import io as _io
+    reader = _csv.reader(_io.StringIO(chunk))
+    for p in reader:
         if len(p) != 13 or p[0] == "timestamp_ms":
             continue
         try:
