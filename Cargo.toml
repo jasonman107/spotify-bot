@@ -1,0 +1,64 @@
+[package]
+name = "spotify-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Polymarket Spotify-market data collector + paper/live trading bot"
+
+[lib]
+name = "spotify_bot"
+path = "src/lib.rs"
+
+# Binary name is hyphenated while the filename is underscored, so an explicit
+# entry is required (Cargo auto-discovery would use the underscored name).
+[[bin]]
+name = "collect-spotify-data"
+path = "src/bin/collect_spotify_data.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration (.env loader)
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
+
+# Error handling
+anyhow = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP (Gamma discovery)
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "http2",
+    "stream",
+] }
+
+# WebSocket (Polymarket market feed)
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+
+# CSV writing (tick recorder)
+csv = "1"
+
+# Explicit rustls provider — prevents panic when both ring and aws-lc-rs features
+# are compiled in through different transitive dependencies.
+# install_default() must be called once at startup before any TLS connection.
+rustls = { version = "0.23", features = ["ring"], default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
