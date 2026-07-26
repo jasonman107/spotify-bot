@@ -197,6 +197,9 @@ def read_quotes(data_dir: Path) -> dict:
     with open(path, "rb") as f:
         f.seek(max(f.seek(0, 2) - TICK_TAIL_BYTES, 0))
         chunk = f.read().decode(errors="replace")
+    # The seek can land mid-row; drop the partial first line so the CSV
+    # reader never starts inside a quoted field.
+    chunk = chunk[chunk.find("\n") + 1:]
     quotes = {}
     # Proper CSV parsing: bucket labels can contain commas (e.g.
     # "Dai Dai - Shakira, Burna Boy") which the writer quotes — a naive
@@ -231,11 +234,24 @@ class TraderState:
         if self.state_file.exists():
             raw = json.loads(self.state_file.read_text())
             self.positions = {
-                tuple(k.split("|")): v for k, v in raw["positions"].items()}
+                self._parse_key(k): v for k, v in raw["positions"].items()}
             self.entries = {
-                tuple(k.split("|")): v
+                self._parse_key(k): v
                 for k, v in raw.get("entries", {}).items()}
         self._rotate_trades_if_schema_changed()
+
+    @staticmethod
+    def _parse_key(k: str) -> tuple:
+        """Keys are JSON-encoded tuples; bucket labels may contain any
+        character (commas, pipes, quotes), so no join/split delimiter is
+        safe. Falls back to the legacy pipe format for old state files."""
+        try:
+            parsed = json.loads(k)
+            if isinstance(parsed, list):
+                return tuple(parsed)
+        except json.JSONDecodeError:
+            pass
+        return tuple(k.split("|"))
 
     def _rotate_trades_if_schema_changed(self):
         if not self.trades_file.exists():
@@ -249,19 +265,25 @@ class TraderState:
 
     def save(self):
         self.state_file.write_text(json.dumps({
-            "positions": {"|".join(k): v for k, v in self.positions.items()},
-            "entries": {"|".join(k): v for k, v in self.entries.items()},
+            "positions": {json.dumps(list(k)): v
+                          for k, v in self.positions.items()},
+            "entries": {json.dumps(list(k)): v
+                        for k, v in self.entries.items()},
         }, indent=1))
 
     def open_cost(self) -> float:
         return sum(p["cost"] for p in self.positions.values())
 
     def append_trade(self, row: dict):
+        # csv.writer, not ",".join: buckets and leaders can contain commas
+        # ("Tyler, The Creator") which must be quoted to keep columns aligned.
+        import csv as _csv
         new = not self.trades_file.exists()
-        with open(self.trades_file, "a") as f:
+        with open(self.trades_file, "a", newline="") as f:
+            w = _csv.writer(f)
             if new:
-                f.write(",".join(TRADE_COLS) + "\n")
-            f.write(",".join(str(row.get(c, "")) for c in TRADE_COLS) + "\n")
+                w.writerow(TRADE_COLS)
+            w.writerow([row.get(c, "") for c in TRADE_COLS])
 
     def append_snapshots(self, rows: list):
         if not rows:

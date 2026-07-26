@@ -71,10 +71,14 @@ def predict_logistic(w: np.ndarray, df: pd.DataFrame) -> np.ndarray:
 # ── Bucket matching (shared by backtest and trader) ─────────────────────────
 
 def norm_tokens(s: str) -> set:
-    """Token set for fuzzy title/artist matching across label formats."""
+    """Token set for fuzzy title/artist matching across label formats.
+
+    Unicode-aware: stripping to [a-z0-9] would reduce a fully non-Latin
+    title (K-pop charts weekly) to an empty set, which best_bucket would
+    silently mis-route to 'Other'."""
     s = re.sub(r"\(w/[^)]*\)", " ", s)
     s = re.sub(r"\(feat[^)]*\)", " ", s, flags=re.I)
-    s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    s = re.sub(r"[^\w ]", " ", s.lower(), flags=re.UNICODE)
     return {t for t in s.split() if t not in {"the", "a", "with", "and"}}
 
 
