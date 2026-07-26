@@ -79,6 +79,11 @@ def fetch_remote(args, dest: Path):
         f' [ -n "$f" ] && tail -c 200000 "$f"'])
     (dest / "ticks_tail.csv").write_text(ticks.stdout)
 
+    # the trader's persisted daily-chart rows — the leader-race input
+    daily = sh(ssh_base + [f"cat {REMOTE_DIR}/data/snapshots/trader_daily.csv "
+                           "2>/dev/null"])
+    (dest / "trader_daily.csv").write_text(daily.stdout)
+
 
 # ── Loaders ──────────────────────────────────────────────────────────────────
 
@@ -282,6 +287,69 @@ def report_divergence(snaps: pd.DataFrame):
                   f"bid/ask={r['yes_bid']:.2f}/{r['yes_ask']:.2f}")
 
 
+def report_leader_race(dest: Path, data_dir: Path):
+    """Reconstruct the cumulative-stream race the trader's leader call is
+    based on: chart week = Fri..Thu, leader = highest cume over the days
+    observed so far (chart POSITION is irrelevant, only summed streams).
+    Uses the same weekly_lib code path as the trader itself."""
+    hdr("Leader race (current chart week, Fri..Thu)")
+    sys.path.insert(0, str(Path(__file__).parent / "research"))
+    try:
+        from weekly_lib import (chart_week_of, load_daily_panel,
+                                week_observations, weekday_factors)
+        base = load_daily_panel(data_dir / "backfill")
+    except (ImportError, FileNotFoundError) as e:
+        print(f"(cannot rebuild race: {e})")
+        return
+    frames = [base]
+    live_f = dest / "trader_daily.csv"
+    if live_f.exists() and live_f.stat().st_size:
+        live = pd.read_csv(live_f)
+        live["date"] = pd.to_datetime(live.date)
+        frames.append(live.groupby(["country", "date", "artist_title"],
+                                   as_index=False).streams.last())
+    panel = (pd.concat(frames, ignore_index=True)
+             .drop_duplicates(subset=["country", "date", "artist_title"],
+                              keep="last"))
+    factors = weekday_factors(base)
+    week_end = chart_week_of(pd.Timestamp(datetime.now(timezone.utc).date()))
+    week_start = week_end - timedelta(days=6)
+    print(f"week: {week_start.date()} .. {week_end.date()}")
+    for country in ("global", "us"):
+        wk = panel[(panel.country == country) & (panel.date >= week_start)
+                   & (panel.date <= week_end)]
+        if wk.empty:
+            print(f"\n{country}: no chart days observed yet")
+            continue
+        days = sorted(wk.date.unique())
+        cume = (wk.groupby("artist_title").streams.sum()
+                .sort_values(ascending=False))
+        print(f"\n{country}: {len(days)} day(s) observed "
+              f"({', '.join(str(d.date()) for d in days)})")
+        piv = (wk[wk.artist_title.isin(cume.head(5).index)]
+               .pivot_table(index="artist_title", columns="date",
+                            values="streams", aggfunc="sum")
+               .reindex(cume.head(5).index))
+        piv.columns = [f"{c:%a %d}" for c in piv.columns]
+        piv["cume"] = cume.head(5)
+        piv["vs_#1"] = (cume.head(5) / cume.iloc[0]).round(3)
+        with pd.option_context("display.width", 140,
+                               "display.float_format", "{:,.0f}".format):
+            out = piv.copy()
+            out["vs_#1"] = piv["vs_#1"].map("{:.3f}".format)
+            print(out.to_string())
+        winners = pd.DataFrame([{"country": country, "week_end": week_end,
+                                 "artist_title": ""}])
+        obs = week_observations(wk, winners, factors)
+        if not obs.empty:
+            o = obs.sort_values("day_i").iloc[-1]
+            print(f"  features: day_i={int(o.day_i)} margin={o.margin:.3f} "
+                  f"proj_margin={o.proj_margin:.3f} "
+                  f"leader_drift={o.leader_drift:.3f} "
+                  f"runner_drift={o.runner_drift:.3f} "
+                  f"proj_top_is_leader={bool(o.proj_top_is_leader)}")
+
+
 def report_health(logh: dict, age_s: float | None, hours: float):
     hdr("Health")
     cycles = logh["cycle_ts"]
@@ -345,6 +413,7 @@ def main() -> int:
           f"({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC)")
     report_trades(trades, args.hours)
     report_positions(state, marks, args.max_exposure)
+    report_leader_race(dest, args.data_dir)
     report_divergence(snaps[snaps["ts"] >= since] if not snaps.empty else snaps)
     report_health(parse_logs(dest), tick_age_s(dest), args.hours)
 
