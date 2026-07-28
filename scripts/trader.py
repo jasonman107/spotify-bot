@@ -214,7 +214,11 @@ def read_quotes(data_dir: Path) -> dict:
             ts, bid, ask = int(p[0]), float(p[6] or 0), float(p[7] or 0)
         except ValueError:
             continue
-        if bid > 0 and ask > 0:
+        # ask <= bid is a crossed-book flicker (an aggressive order captured
+        # mid-match). That ask is not takeable — a live FAK at it fills zero,
+        # but the paper executor would book a phantom fill. Skip; the next
+        # uncrossed row for the key (usually the same batch) wins.
+        if bid > 0 and ask > bid:
             quotes[(p[1], p[3], p[5])] = {
                 "ts_ms": ts, "bid": bid, "ask": ask, "token_id": p[4]}
     return quotes
@@ -386,36 +390,53 @@ def cycle(args, registry, chart, state, executor, weights, snap_due):
                     "yes_bid": q["bid"], "yes_ask": q["ask"],
                 })
 
-        if not ticks_fresh or args.observe or label is None:
+        if not ticks_fresh or args.observe:
+            continue
+
+        # Exits: every open position in this event, not just the leader's
+        # bucket — a leader flip must not orphan the old position. For a
+        # non-leader bucket the model's win probability is at most
+        # 1 - p(leader); that upper bound is conservative (it delays exits,
+        # never forces them).
+        for key in [k for k in list(state.positions) if k[0] == ev["slug"]]:
+            pos = state.positions[key]
+            b_label = key[1]
+            prob = p_model if b_label == label else max(0.0, 1.0 - p_model)
+            q2 = quotes.get((ev["slug"], b_label, "Yes"))
+            bid = q2["bid"] if q2 else 0.0
+            if not should_exit(prob, bid, args.exit_margin):
+                continue
+            fill = executor.sell(pos["token_id"], bid, pos["shares"])
+            if fill is None:
+                continue
+            cost_out = pos["cost"] * (fill["shares"] / pos["shares"])
+            pnl = fill["proceeds"] - cost_out
+            state.append_trade({
+                "ts": str(now), "action": "exit",
+                "event_slug": ev["slug"], "bucket": b_label,
+                "side": "yes", "price": round(fill["price"], 4),
+                "shares": fill["shares"], "cost": round(cost_out, 4),
+                "model_p": round(prob, 4), "pnl": round(pnl, 4),
+            })
+            print(f"EXIT {ev['slug']} {b_label} @ {fill['price']:.3f} "
+                  f"(model {prob:.3f}, pnl {pnl:+.3f})")
+            remaining = pos["shares"] - fill["shares"]
+            if remaining >= 0.01:
+                pos["shares"] = remaining
+                pos["cost"] -= cost_out
+            else:
+                del state.positions[key]
+            state.save()
+
+        if label is None:
             continue
         key = (ev["slug"], label, "yes")
         q = quotes.get((ev["slug"], label, "Yes"))
-        pos = state.positions.get(key)
-        if pos is not None:
-            bid = q["bid"] if q else 0.0
-            if should_exit(p_model, bid, args.exit_margin):
-                fill = executor.sell(pos["token_id"], bid, pos["shares"])
-                if fill:
-                    cost_out = pos["cost"] * (fill["shares"] / pos["shares"])
-                    pnl = fill["proceeds"] - cost_out
-                    state.append_trade({
-                        "ts": str(now), "action": "exit",
-                        "event_slug": ev["slug"], "bucket": label,
-                        "side": "yes", "price": round(fill["price"], 4),
-                        "shares": fill["shares"], "cost": round(cost_out, 4),
-                        "model_p": round(p_model, 4), "pnl": round(pnl, 4),
-                    })
-                    print(f"EXIT {ev['slug']} {label} @ {fill['price']:.3f} "
-                          f"(model {p_model:.3f}, pnl {pnl:+.3f})")
-                    remaining = pos["shares"] - fill["shares"]
-                    if remaining >= 0.01:
-                        pos["shares"] = remaining
-                        pos["cost"] -= cost_out
-                    else:
-                        del state.positions[key]
-                    state.save()
+        if key in state.positions or not chart_week_open or q is None:
             continue
-        if not chart_week_open or q is None:
+        # per-quote freshness: the global ticks_fresh check passes if ANY
+        # token ticked recently; this bucket's own quote must be fresh too
+        if now.timestamp() * 1000 - q["ts_ms"] > MAX_TICK_AGE_S * 1000:
             continue
         if not (PRICE_LO <= q["ask"] <= PRICE_HI):
             continue
